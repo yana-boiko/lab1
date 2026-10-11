@@ -59,7 +59,6 @@ def _worker(args):
             records.append((scheduled - t0, sent - t0, done - t0, status))
 
     if mode == "open":
-        # Моменти відправки обчислюються наперед: t_i = offset + i / rate.
         n = int(total_s * rate)
         with ThreadPoolExecutor(max_workers=threads) as pool:
             for i in range(n):
@@ -67,10 +66,11 @@ def _worker(args):
                 delay = scheduled - time.perf_counter()
                 if delay > 0:
                     time.sleep(delay)
+
                 pool.submit(one, scheduled)
-
-
+    else:
         end = t0 + total_s
+
 
         def loop():
             delay = t0 - time.perf_counter()
