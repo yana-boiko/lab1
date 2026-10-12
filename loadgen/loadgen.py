@@ -132,10 +132,10 @@ def run_load(url, rate, duration, warmup, path=None, ids=None, mode="open", conc
     non2xx = sum(1 for r in measured if not (200 <= r[3] < 300))
 
 
-    in_system = sum(max(0.0, min(r[2], w1) - max(r[1], w0)) for r in records) / duration
-    sent_in_window = [r for r in records if w0 <= r[1] < w1]
-    lam = len(sent_in_window) / duration
-    w_mean = statistics.mean([r[2] - r[1] for r in sent_in_window]) if sent_in_window else float("nan")
+    in_system = sum(max(0.0, min(r[2], w1) - max(r[0], w0)) for r in records) / duration
+    lam = len(measured) / duration
+    w_mean = statistics.mean([r[2] - r[0] for r in measured]) if measured else float("nan")
+    gen_lag = statistics.mean([r[1] - r[0] for r in measured]) if measured else float("nan")
 
     summary = {
         "label": label or f"{mode}_r{rate}",
@@ -149,10 +149,12 @@ def run_load(url, rate, duration, warmup, path=None, ids=None, mode="open", conc
         "p99_ms": round(percentile(lat_ms, 99), 1),
         "non2xx_pct": round(100 * non2xx / len(measured), 2) if measured else None,
         "requests": len(measured),
-        "little_lambda": round(lam, 1),
-        "little_W_s": round(w_mean, 4),
-        "little_L_calc": round(lam * w_mean, 2),
-        "little_L_measured": round(in_system, 2),
+        "little_lambda": round(lam, 2),
+        "little_W_s": round(w_mean, 5),
+        "little_L_calc": round(lam * w_mean, 4),
+        "little_L_measured": round(in_system, 4),
+        "little_diff_pct": round(100 * abs(lam * w_mean - in_system) / in_system, 2) if in_system else None,
+        "gen_lag_ms": round(gen_lag * 1000, 2),
         "processes": processes,
     }
     if save:
@@ -251,6 +253,19 @@ def cmd_closed(a):
                  label=f"closed_web{a.instances}_c{a.concurrency}")
     print_summary(s)
 
+def cmd_little(a):
+    w0, w1 = a.warmup, a.warmup + a.duration
+    with open(a.file, newline="") as f:
+        recs = [(float(r["scheduled_s"]), float(r["sent_s"]), float(r["done_s"])) for r in csv.DictReader(f)]
+    m = [r for r in recs if w0 <= r[0] < w1]
+    lam = len(m) / a.duration
+    w = statistics.mean(r[2] - r[0] for r in m)
+    l_meas = sum(max(0.0, min(r[2], w1) - max(r[0], w0)) for r in recs) / a.duration
+    lag = statistics.mean(r[1] - r[0] for r in m)
+    print(f"{os.path.basename(a.file)}: λ = {lam:.2f} запитів/с, W = {w:.5f} с, "
+          f"λ·W = {lam * w:.4f}, виміряне L = {l_meas:.4f}, "
+          f"розбіжність = {100 * abs(lam * w - l_meas) / l_meas:.2f}%  (затримка генератора {lag * 1000:.2f} мс)")
+
 
 def main():
     p = argparse.ArgumentParser(description="Генератор навантаження з фіксованою швидкістю")
@@ -289,6 +304,12 @@ def main():
     sp.add_argument("--rate", type=int, default=0, help="рівень відкритого контуру, з яким порівнюємо (для підпису)")
     sp.add_argument("--concurrency", type=int, required=True)
     sp.set_defaults(func=cmd_closed)
+
+    sp = sub.add_parser("little", help="перерахувати закон Літтла із сирого CSV прогону")
+    sp.add_argument("file")
+    sp.add_argument("--duration", type=float, default=30)
+    sp.add_argument("--warmup", type=float, default=10)
+    sp.set_defaults(func=cmd_little)
 
     a = p.parse_args()
     a.func(a)
