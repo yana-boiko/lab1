@@ -3,6 +3,15 @@
 Варіант 4. Сутність: результат лабораторного аналізу, ресурс `/lab-results`.
 Стек: Python 3.12, FastAPI, psycopg 3, PostgreSQL 16.
 
+**Повний звіт: [REPORT.md](REPORT.md).**
+
+## Запуск
+
+```powershell
+copy .env.example .env          # один раз: вписати пароль
+docker compose up -d --build    # стенд з одним вебінстансом (для двох: --scale web=2)
+```
+
 ## Етап 1. Проєктування
 
 ### Таблиця lab_results
