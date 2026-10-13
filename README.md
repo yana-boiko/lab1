@@ -1,62 +1,59 @@
-# Лабораторна робота 1. Проєктування і розгортання CRUD-сервісу
+# Лабораторна робота 1 — CRUD-сервіс /lab-results
 
-Варіант 4. Сутність: результат лабораторного аналізу, ресурс `/lab-results`.
-Стек: Python 3.12, FastAPI, psycopg 3, PostgreSQL 16.
+Варіант 4: результат лабораторного аналізу. Сервіс на Python 3.12 + FastAPI, база PostgreSQL 16, балансувальник nginx, усе в Docker Compose.
 
-## Етап 1. Проєктування
+## Запуск
 
-### Таблиця lab_results
+Потрібен Docker Desktop.
 
-| Поле | Тип | Пояснення                                               |
-|---|---|---------------------------------------------------------|
-| id | BIGINT GENERATED ALWAYS AS IDENTITY, PK | номер запису, видає база                                |
-| patient_code | VARCHAR(32) | код пацієнта, може містити літери                       |
-| test_code | VARCHAR(32) | код показника (наприклад GLU для глюкози), поле фільтра |
-| value | NUMERIC(14,4) | результат; точне число без похибки float                |
-| unit | VARCHAR(20) | одиниці виміру, залежать від показника (mmol/L, g/L, %) |
-| ref_low | NUMERIC(14,4) | нижня межа норми                                        |
-| ref_high | NUMERIC(14,4) | верхня межа норми                  |
-| sample_date | DATE | дата проби, без часу                                    |
-
-Обмеження: CHECK (ref_low < ref_high).
-
-Індекси: первинний ключ за id (пошук за номером) і idx_lab_results_test_code за test_code (фільтр у переліку).
+```
+copy .env.example .env
+docker compose up -d --build
+```
 
 
-### API
+Стенд піднімається на http://localhost:8000. Схема бази накочується автоматично з `db/schema.sql`.
 
-Тіло запису однакове для POST і PUT. Усі поля обовʼязкові, id передавати не можна (його видає база):
+Перевірка:
 
-{"patient_code": "P-0001", "test_code": "GLU", "value": 5.4, "unit": "mmol/L", "ref_low": 3.9, "ref_high": 6.1, "sample_date": "2026-10-01"}
+- http://localhost:8000/healthz — відповідь 200, якщо база доступна (503, якщо ні);
+- http://localhost:8000/docs — документація API;
+- `docker compose ps` — db і web у стані healthy.
 
-У відповіді повертається той самий запис плюс поле id.
+## Два вебінстанси
 
-| Метод | Шлях | Призначення | Тіло запиту | Відповідь | Коди |
-|---|---|---|---|---|---|
-| POST | /lab-results | створення | запис | створений запис з id | 201 створено; 400 невалідні дані |
-| GET | /lab-results | перелік, пагінація через limit і offset, фільтр за test_code | немає | список записів і загальна кількість | 200 успіх |
-| GET | /lab-results/{id} | один запис | немає | один запис | 200 знайдено; 404 не знайдено |
-| PUT | /lab-results/{id} | повна заміна запису | повний запис | оновлений запис | 200 оновлено; 404 не знайдено; 400 невалідні дані |
-| DELETE | /lab-results/{id} | видалення | немає | порожня | 204 видалено; 404 не знайдено |
-| GET | /healthz | готовність сервісу | немає | стан бази | 200 база доступна; 503 база недоступна |
+```
+docker compose up -d --scale web=2
+docker compose up -d --force-recreate --no-deps lb
+```
 
-Відповідь переліку:
+Друга команда перестворює балансувальник, щоб він отримав адреси обох інстансів.
 
-{"items": [...], "total": 2, "limit": 20, "offset": 0}
+## Навантаження
 
-**Пагінація:** limit за замовчуванням 20, максимум 100; offset від 0.
+```
+python loadgen\loadgen.py seed
+python loadgen\loadgen.py check
+python loadgen\loadgen.py series --instances 1
+```
 
-**Фільтр:** ?test_code=GLU повертає тільки записи з цим кодом показника; без фільтра повертаються всі записи.
+Сирі результати прогонів лежать у `results/raw`.
 
-**Валідація (відповідь 400):**
-- value, ref_low, ref_high мають бути числами (рядок "5.4" не приймається);
-- ref_low має бути меншим за ref_high;
-- текстові поля не порожні, дата у форматі РРРР-ММ-ДД.
+## Зупинка
 
-Приклад помилки 400:
+```
+docker compose down     
+docker compose down -v 
+```
 
-{"detail": "validation error", "errors": [{"field": "ref_high", "error": "ref_low (7.0) must be less than ref_high (6.1)"}]}
+## Структура
 
-Приклад помилки 404:
+- `app/` — код сервісу (`main.py`) і скрипт healthcheck (`healthcheck.py`)
+- `db/schema.sql` — схема таблиці
+- `lb/nginx.conf` — конфігурація балансувальника
+- `loadgen/` — генератор навантаження
+- `scripts/` — допоміжні скрипти (перевірка циклу CRUD, розбір затримки)
+- `results/` — результати вимірювань
+- `Dockerfile`, `.dockerignore`, `docker-compose.yml`, `.env.example`
 
-{"detail": "lab result 999 not found"}
+Звіт: [report.md](report.md)
