@@ -45,18 +45,48 @@ def http_request(host, port, method, path, body=None):
 
 def _worker(args):
     (host, port, paths, start_wall, total_s, rate, offset, mode, concurrency, threads) = args
+    # ЗМІНА (зауваження 4): на Windows таймер за замовчуванням тікає кроком ~15.6 мс, тому
+    # time.sleep прокидається лише на межах тіків і вибірка L потрапляє в одну й ту саму
+    # фазу щодо відправлення запитів. Просимо крок 1 мс.
+    try:
+        import ctypes
+        ctypes.windll.winmm.timeBeginPeriod(1)
+    except Exception:
+        pass
     t0 = time.perf_counter() + (start_wall - time.time())
     records = []
     lock = threading.Lock()
     rnd = random.Random(os.getpid())
+    # ЗМІНА (зауваження 4): лічильники відправлених і завершених запитів
+    # та потік-семплер, який кожні 10 мс записує їх різницю
+    state = [0, 0]  # [відправлено, завершено]
+    samples = []
+    stop = threading.Event()
+
+    def sampler():
+        # інтервал між вибірками випадковий (5-15 мс, у середньому 10 мс): строго
+        # періодична вибірка збігається за фазою з сіткою відправлення запитів
+        # і систематично занижує L
+        srnd = random.Random()
+        while not stop.is_set():
+            with lock:
+                n = state[0] - state[1]
+            samples.append((time.perf_counter() - t0, n))
+            time.sleep(srnd.uniform(0.005, 0.015))
+
+    sampler_thread = threading.Thread(target=sampler, daemon=True)
+    sampler_thread.start()
 
     def one(scheduled):
         path = rnd.choice(paths)
+        with lock:
+            state[0] += 1
         sent = time.perf_counter()
         status, _ = http_request(host, port, "GET", path)
         done = time.perf_counter()
         with lock:
             records.append((scheduled - t0, sent - t0, done - t0, status))
+            state[1] += 1
 
     if mode == "open":
         n = int(total_s * rate)
@@ -84,7 +114,9 @@ def _worker(args):
             t.start()
         for t in ts:
             t.join()
-    return records
+    stop.set()
+    sampler_thread.join()
+    return records, samples
 
 
 def percentile(sorted_vals, p):
@@ -122,7 +154,7 @@ def run_load(url, rate, duration, warmup, path=None, ids=None, mode="open", conc
 
     with mp.Pool(processes) as pool:
         parts = pool.map(_worker, jobs)
-    records = [r for part in parts for r in part]
+    records = [r for recs, _ in parts for r in recs]
 
 
     w0, w1 = warmup, warmup + duration
@@ -134,9 +166,18 @@ def run_load(url, rate, duration, warmup, path=None, ids=None, mode="open", conc
     non2xx = sum(1 for r in measured if not (200 <= r[3] < 300))
 
 
-    in_system = sum(max(0.0, min(r[2], w1) - max(r[0], w0)) for r in records) / duration
-    lam = len(measured) / duration
-    w_mean = statistics.mean([r[2] - r[0] for r in measured]) if measured else float("nan")
+    # (зауваження 4): L вимірюється вибіркою, а не виводиться з інтервалів запитів.
+    # L = сума по процесах середнього за вікно значення (відправлено - завершено).
+    # Система для закону Літтла: від фактичної відправки запиту до відповіді,
+    # тому lambda і W рахуються за моментом відправки (r[1]), а не запланованим.
+    in_system = 0.0
+    for _, smp in parts:
+        vals = [n for t, n in smp if w0 <= t < w1]
+        if vals:
+            in_system += statistics.mean(vals)
+    sent_in = [r for r in records if w0 <= r[1] < w1]
+    lam = len(sent_in) / duration
+    w_mean = statistics.mean([r[2] - r[1] for r in sent_in]) if sent_in else float("nan")
     gen_lag = statistics.mean([r[1] - r[0] for r in measured]) if measured else float("nan")
 
     summary = {
@@ -166,6 +207,13 @@ def run_load(url, rate, duration, warmup, path=None, ids=None, mode="open", conc
             wr.writerow(["scheduled_s", "sent_s", "done_s", "status"])
             for r in sorted(records):
                 wr.writerow([f"{r[0]:.6f}", f"{r[1]:.6f}", f"{r[2]:.6f}", r[3]])
+        os.makedirs(os.path.join(RESULTS_DIR, "inflight"), exist_ok=True)
+        with open(os.path.join(RESULTS_DIR, "inflight", f"{summary['label']}.csv"), "w", newline="") as f:
+            wr = csv.writer(f)
+            wr.writerow(["process", "t_s", "in_flight"])
+            for pi, (_, smp) in enumerate(parts):
+                for t, n in smp:
+                    wr.writerow([pi, f"{t:.4f}", n])
         with open(os.path.join(RESULTS_DIR, "runs.jsonl"), "a") as f:
             f.write(json.dumps(summary, ensure_ascii=False) + "\n")
     return summary
@@ -256,17 +304,23 @@ def cmd_closed(a):
     print_summary(s)
 
 def cmd_little(a):
+    # (зауваження 4): L береться з вибірки results/inflight/<файл>.csv
     w0, w1 = a.warmup, a.warmup + a.duration
     with open(a.file, newline="") as f:
         recs = [(float(r["scheduled_s"]), float(r["sent_s"]), float(r["done_s"])) for r in csv.DictReader(f)]
-    m = [r for r in recs if w0 <= r[0] < w1]
+    m = [r for r in recs if w0 <= r[1] < w1]
     lam = len(m) / a.duration
-    w = statistics.mean(r[2] - r[0] for r in m)
-    l_meas = sum(max(0.0, min(r[2], w1) - max(r[0], w0)) for r in recs) / a.duration
-    lag = statistics.mean(r[1] - r[0] for r in m)
+    w = statistics.mean(r[2] - r[1] for r in m)
+    sample_file = os.path.join(RESULTS_DIR, "inflight", os.path.basename(a.file))
+    per_proc = {}
+    with open(sample_file, newline="") as f:
+        for r in csv.DictReader(f):
+            if w0 <= float(r["t_s"]) < w1:
+                per_proc.setdefault(r["process"], []).append(int(r["in_flight"]))
+    l_meas = sum(statistics.mean(v) for v in per_proc.values())
     print(f"{os.path.basename(a.file)}: λ = {lam:.2f} запитів/с, W = {w:.5f} с, "
           f"λ·W = {lam * w:.4f}, виміряне L = {l_meas:.4f}, "
-          f"розбіжність = {100 * abs(lam * w - l_meas) / l_meas:.2f}%  (затримка генератора {lag * 1000:.2f} мс)")
+          f"розбіжність = {100 * abs(lam * w - l_meas) / l_meas:.2f}%")
 
 
 def main():
