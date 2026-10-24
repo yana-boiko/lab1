@@ -10,7 +10,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationInfo, field_validator
+from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, ValidationInfo, field_validator
 
 DB_HOST = os.environ.get("DB_HOST", "localhost")
 DB_PORT = os.environ.get("DB_PORT", "5432")
@@ -48,8 +48,16 @@ def _reject_strings(v):
     return v
 Number = Annotated[Decimal, BeforeValidator(_reject_strings), Field(max_digits=14, decimal_places=4)]
 
-Code = Annotated[str, Field(min_length=1, max_length=32)]
-ItemId = Annotated[int, Path(ge=1, le=2**63 - 1)]  # діапазон BIGINT
+# (зауваження 6) Рядки з керівними символами (зокрема \u0000) відхиляються
+# з 400 і назвою поля, бо psycopg не приймає \u0000 і давав 500 (DataError).
+def _no_control_chars(v):
+    if v is not None and any(ord(ch) < 32 or ord(ch) == 127 for ch in v):
+        raise ValueError("must not contain control characters")
+    return v
+
+Code = Annotated[str, Field(min_length=1, max_length=32), AfterValidator(_no_control_chars)]
+
+ItemId = Annotated[int, Path(ge=1, le=2**63 - 1)]
 
 
 class LabResultIn(BaseModel):
@@ -58,7 +66,8 @@ class LabResultIn(BaseModel):
     patient_code: Code
     test_code: Code
     value: Number
-    unit: Annotated[str, Field(min_length=1, max_length=20)]
+    # додано перевірку на керівні символи
+    unit: Annotated[str, Field(min_length=1, max_length=20), AfterValidator(_no_control_chars)]
     ref_low: Number
     ref_high: Number
     sample_date: date
@@ -123,7 +132,7 @@ def create_lab_result(body: LabResultIn):
 def list_lab_results(
     limit: Annotated[int, Query(ge=1, le=MAX_LIMIT)] = DEFAULT_LIMIT,
     offset: Annotated[int, Query(ge=0)] = 0,
-    test_code: Annotated[str | None, Query(min_length=1, max_length=32)] = None,
+    test_code: Annotated[str | None, Query(min_length=1, max_length=32), AfterValidator(_no_control_chars)] = None,
 ):
     where, params = "", {"limit": limit, "offset": offset}
     if test_code is not None:
