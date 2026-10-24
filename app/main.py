@@ -3,13 +3,14 @@ import os
 from contextlib import asynccontextmanager
 from datetime import date
 from typing import Annotated
+from decimal import Decimal
 
 from fastapi import FastAPI, Path, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationInfo, field_validator
 
 DB_HOST = os.environ.get("DB_HOST", "localhost")
 DB_PORT = os.environ.get("DB_PORT", "5432")
@@ -24,7 +25,7 @@ CONNINFO = (
 
 DEFAULT_LIMIT = 20
 MAX_LIMIT = 100
-MAX_ABS_NUMBER = 1e10
+
 
 pool = ConnectionPool(CONNINFO, min_size=1, max_size=10, open=False, kwargs={"row_factory": dict_row})
 
@@ -38,7 +39,15 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title="Lab results service", lifespan=lifespan)
 
-Number = Annotated[float, Field(strict=True, gt=-MAX_ABS_NUMBER, lt=MAX_ABS_NUMBER, allow_inf_nan=False)]
+# Замість float тепер Decimal, узгоджений з колонкою NUMERIC(14, 4).
+# Значення з більш ніж 4 знаками після коми або більш ніж 10 цілими цифрами
+# отримують 400 з назвою поля, а не 500 від бази.
+def _reject_strings(v):
+    if isinstance(v, str):
+        raise ValueError("must be a number, not a string")
+    return v
+Number = Annotated[Decimal, BeforeValidator(_reject_strings), Field(max_digits=14, decimal_places=4)]
+
 Code = Annotated[str, Field(min_length=1, max_length=32)]
 ItemId = Annotated[int, Path(ge=1, le=2**63 - 1)]  # діапазон BIGINT
 
