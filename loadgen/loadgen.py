@@ -127,7 +127,9 @@ def run_load(url, rate, duration, warmup, path=None, ids=None, mode="open", conc
 
     w0, w1 = warmup, warmup + duration
     measured = [r for r in records if w0 <= r[0] < w1]
-    completed = [r for r in records if w0 <= r[2] < w1]
+    # (зауваження 2): досягнута інтенсивність рахується лише за відповідями 2xx,
+    # завершеними у вікні; обриви з'єднання і тайм-аути (код 0) та 4xx/5xx не враховуються
+    completed = [r for r in records if w0 <= r[2] < w1 and 200 <= r[3] < 300]
     lat_ms = sorted((r[2] - r[0]) * 1000 for r in measured)
     non2xx = sum(1 for r in measured if not (200 <= r[3] < 300))
 
