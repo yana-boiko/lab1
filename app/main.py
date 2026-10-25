@@ -11,6 +11,10 @@ from fastapi.responses import JSONResponse
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, ValidationInfo, field_validator
+import time
+
+from fastapi import Request, Response
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
 
 DB_HOST = os.environ.get("DB_HOST", "localhost")
 DB_PORT = os.environ.get("DB_PORT", "5432")
@@ -38,6 +42,36 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="Lab results service", lifespan=lifespan)
+
+REQUESTS = Counter("http_requests_total", "Кількість запитів", ["method", "path", "code"])
+DURATION = Histogram(
+    "http_request_duration_seconds",
+    "Тривалість обробки запиту, с",
+    buckets=[0.001, 0.002, 0.004, 0.008, 0.016, 0.032, 0.064, 0.128, 0.256, 0.512, 1.024],
+)
+IN_PROGRESS = Gauge("http_requests_in_progress", "Запитів в обробці")
+
+
+@app.middleware("http")
+async def metrics_middleware(request: Request, call_next):
+    IN_PROGRESS.inc()
+    start = time.perf_counter()
+    code = 500
+    try:
+        response = await call_next(request)
+        code = response.status_code
+        return response
+    finally:
+        route = request.scope.get("route")
+        path = route.path if route else "unmatched"
+        REQUESTS.labels(request.method, path, str(code)).inc()
+        DURATION.observe(time.perf_counter() - start)
+        IN_PROGRESS.dec()
+
+
+@app.get("/metrics")
+def metrics():
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 # Замість float тепер Decimal, узгоджений з колонкою NUMERIC(14, 4).
 # Значення з більш ніж 4 знаками після коми або більш ніж 10 цілими цифрами
