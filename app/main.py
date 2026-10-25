@@ -12,7 +12,7 @@ from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, ValidationInfo, field_validator
 import time
-
+import socket
 from fastapi import Request, Response
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
 
@@ -29,9 +29,9 @@ CONNINFO = (
 
 DEFAULT_LIMIT = 20
 MAX_LIMIT = 100
+DB_POOL_SIZE = int(os.environ.get("DB_POOL_SIZE", "15"))
 
-
-pool = ConnectionPool(CONNINFO, min_size=1, max_size=10, open=False, kwargs={"row_factory": dict_row})
+pool = ConnectionPool(CONNINFO, min_size=1, max_size=DB_POOL_SIZE, open=False, kwargs={"row_factory": dict_row})
 
 
 @asynccontextmanager
@@ -42,6 +42,8 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="Lab results service", lifespan=lifespan)
+
+POD_NAME = os.environ.get("POD_NAME") or socket.gethostname()
 
 REQUESTS = Counter("http_requests_total", "Кількість запитів", ["method", "path", "code"])
 DURATION = Histogram(
@@ -59,6 +61,7 @@ async def metrics_middleware(request: Request, call_next):
     code = 500
     try:
         response = await call_next(request)
+        response.headers["X-Pod"] = POD_NAME
         code = response.status_code
         return response
     finally:
@@ -72,6 +75,10 @@ async def metrics_middleware(request: Request, call_next):
 @app.get("/metrics")
 def metrics():
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+@app.get("/livez")
+def livez():
+    return {"status": "alive"}
 
 # Замість float тепер Decimal, узгоджений з колонкою NUMERIC(14, 4).
 # Значення з більш ніж 4 знаками після коми або більш ніж 10 цілими цифрами
