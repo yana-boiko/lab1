@@ -1,4 +1,4 @@
-"""Ступінчастий генератор навантаження з фіксованою швидкістю надходження (відкритий контур). """
+"""Ступінчастий генератор навантаження з фіксованою швидкістю надходження (відкритий контур)."""
 import argparse
 import csv
 import http.client
@@ -22,7 +22,6 @@ _local = threading.local()
 
 
 def request_once(host, port, path):
-
     for attempt in range(2):
         c = getattr(_local, "conn", None)
         reused = c is not None and c.sock is not None
@@ -48,7 +47,6 @@ def request_once(host, port, path):
 
 
 def worker(p, nproc, host, port, paths, start_wall, segs, stop, ok_counts, threads, out_q):
-    # На Windows таймер за замовчуванням тікає кроком ~15.6 мс, просимо крок 1 мс.
     try:
         import ctypes
         ctypes.windll.winmm.timeBeginPeriod(1)
@@ -79,7 +77,6 @@ def worker(p, nproc, host, port, paths, start_wall, segs, stop, ok_counts, threa
         if stopped:
             break
         n = int(dur * rate)
-        # i-й запит сегмента надсилає процес з номером i mod nproc: інтенсивність ділиться порівну
         for i in range(p, n, nproc):
             if stop.is_set():
                 stopped = True
@@ -174,7 +171,6 @@ def run(a):
         pr.join()
     print(f"Прогін зупинено: {reason}")
 
-    # ---------- посекундна таблиця ----------
     t_end = int(warmup + done_steps * step_s)
     sent = [0] * t_end
     ach = [0] * t_end
@@ -203,15 +199,14 @@ def run(a):
     with open(sec_path, "w", newline="") as f:
         wr = csv.writer(f)
         wr.writerow(["second", "step", "target_rps", "sent_rps", "achieved_rps", "ok_2xx", "non2xx",
-                     "conn_errors", "p50_ms", "p95_ms", "p99_ms"])
+                     "conn_errors", "p50_ms", "p95_ms", "p99_ms", "epoch_s"])
         for sec in range(t_end):
             k = step_of(sec)
             ls = sorted(lat[sec])
             wr.writerow([sec, k, a.start_rate if k == 0 else rate_of(k), sent[sec], ach[sec], ach[sec],
                          non2[sec], conn[sec], fmt(percentile(ls, 50)), fmt(percentile(ls, 95)),
-                         fmt(percentile(ls, 99))])
+                         fmt(percentile(ls, 99)), round(start_wall + sec)])
 
-    # ---------- підсумок за сходинками (останні 15 с кожної сходинки) ----------
     steps = []
     for k in range(1, done_steps + 1):
         lo = int(warmup + (k - 1) * step_s + TRANSIENT)
@@ -228,6 +223,9 @@ def run(a):
             "p99_ms": fmt(percentile(ls, 99)),
             "non2xx_pct": round(100 * n_bad / (n_ok + n_bad), 2) if n_ok + n_bad else "",
             "conn_errors": sum(conn[s] for s in win),
+            # unix-час початку і кінця 15-секундного вікна: для запитів до Prometheus (p99 сервера, CPU)
+            "window_start_epoch": round(start_wall + lo),
+            "window_end_epoch": round(start_wall + hi),
         })
     st_path = os.path.join(RESULTS_DIR, f"{a.label}_steps.csv")
     with open(st_path, "w", newline="") as f:
@@ -265,7 +263,7 @@ def main():
     p.add_argument("--step-rate", type=int, default=200, help="приріст інтенсивності між сходинками")
     p.add_argument("--max-steps", type=int, default=15, help="найбільша кількість сходинок")
     p.add_argument("--g", type=float, default=None, help="межа генератора G: зупинитись після сходинки, що її досягла")
-    p.add_argument("--threads", type=int, default=256, help="потоків у пулі кожного процесу")
+    p.add_argument("--threads", type=int, default=64, help="потоків у пулі кожного процесу")
     p.add_argument("--processes", type=int, default=None, help="процесів (за замовчуванням кількість ядер)")
     p.add_argument("--save-raw", action="store_true", help="зберегти сирі записи кожного запиту")
     a = p.parse_args()
