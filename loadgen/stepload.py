@@ -143,6 +143,85 @@ def run(a):
     nproc = min(a.processes or os.cpu_count() or 1, a.connections)
     # a.connections зʼєднань ділимо між процесами порівну
     conns_of = lambda p: a.connections // nproc + (1 if p < a.connections % nproc else 0)
+    if a.profile:
+        segs, t = [], 0.0
+        for item in a.profile.split(","):
+            dur, rate = item.split(":")
+            segs.append((t, float(dur), float(rate)))
+            t += float(dur)
+        total = int(t)
+        stop = mp.Event()
+        ok_counts = mp.Array("i", total + 60)
+        q = mp.Queue()
+        start_wall = time.time() + 2.0
+        procs = [mp.Process(target=worker, args=(p, nproc, host, port, paths, start_wall, segs, stop,
+                                                 ok_counts, conns_of(p), q)) for p in range(nproc)]
+        for pr in procs:
+            pr.start()
+        print(f"Прогін {a.label}: профіль {a.profile}, процесів {nproc}, зʼєднань {a.connections}")
+        records = []
+        for _ in procs:
+            records.extend(q.get())
+        for pr in procs:
+            pr.join()
+
+        sent = [0] * total
+        ach = [0] * total
+        non2 = [0] * total
+        conn = [0] * total
+        lat = [[] for _ in range(total)]
+        for sched, s, d, st in records:
+            si, di = int(s), int(d)
+            if 0 <= si < total:
+                sent[si] += 1
+            if 0 <= di < total:
+                if 200 <= st < 300:
+                    ach[di] += 1
+                elif st == CONN_ERR_CODE:
+                    conn[di] += 1
+                else:
+                    non2[di] += 1
+                if st != CONN_ERR_CODE:
+                    lat[di].append((d - sched) * 1000)
+
+        os.makedirs(RESULTS_DIR, exist_ok=True)
+        sec_path = os.path.join(RESULTS_DIR, f"{a.label}_seconds.csv")
+        with open(sec_path, "w", newline="") as f:
+            wr = csv.writer(f)
+            wr.writerow(["second", "segment", "target_rps", "sent_rps", "achieved_rps", "non2xx",
+                         "conn_errors", "p50_ms", "p95_ms", "p99_ms", "epoch_s"])
+            for sec in range(total):
+                k = [i for i, sg in enumerate(segs, 1) if sg[0] <= sec < sg[0] + sg[1]][0]
+                ls = sorted(lat[sec])
+                wr.writerow([sec, k, segs[k - 1][2], sent[sec], ach[sec], non2[sec], conn[sec],
+                             fmt(percentile(ls, 50)), fmt(percentile(ls, 95)), fmt(percentile(ls, 99)),
+                             round(start_wall + sec)])
+
+        rows = []
+        for k, (s0, dur, rate) in enumerate(segs, 1):
+            win = range(int(s0), int(s0 + dur))
+            ls = sorted(x for s in win for x in lat[s])
+            rows.append({
+                "segment": k, "duration_s": dur, "target_rps": rate,
+                "sent_rps": round(statistics.mean(sent[s] for s in win), 1),
+                "achieved_rps": round(statistics.mean(ach[s] for s in win), 1),
+                "p50_ms": fmt(percentile(ls, 50)), "p95_ms": fmt(percentile(ls, 95)),
+                "p99_ms": fmt(percentile(ls, 99)),
+                "non2xx": sum(non2[s] for s in win), "conn_errors": sum(conn[s] for s in win),
+                "start_epoch": round(start_wall + s0), "end_epoch": round(start_wall + s0 + dur)})
+        seg_path = os.path.join(RESULTS_DIR, f"{a.label}_segments.csv")
+        with open(seg_path, "w", newline="") as f:
+            wr = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+            wr.writeheader()
+            wr.writerows(rows)
+
+        print("\nвідрізок | тривалість, с | задано | надіслано | досягнуто | p50, мс | p95, мс | p99, мс | не-2xx | помилок з'єдн.")
+        for r in rows:
+            print(f"{r['segment']:^8} | {r['duration_s']:^13g} | {r['target_rps']:^6g} | {r['sent_rps']:^9} | "
+                  f"{r['achieved_rps']:^9} | {r['p50_ms']!s:^7} | {r['p95_ms']!s:^7} | {r['p99_ms']!s:^7} | "
+                  f"{r['non2xx']:^6} | {r['conn_errors']:^14}")
+        print(f"Файли: {os.path.relpath(sec_path)}, {os.path.relpath(seg_path)}")
+        return
     warmup, step_s = a.warmup, a.step_seconds
 
     def rate_of(k):
@@ -287,6 +366,7 @@ def main():
     p.add_argument("--connections", type=int, default=32, help="постійних зʼєднань у всьому генераторі (8 · R, R = 4)")
     p.add_argument("--processes", type=int, default=None, help="процесів (за замовчуванням кількість ядер)")
     p.add_argument("--save-raw", action="store_true", help="зберегти сирі записи кожного запиту")
+    p.add_argument("--profile", default=None, help='відрізки "тривалість:інтенсивність" через кому"')
     a = p.parse_args()
     if a.label is None:
         a.label = "step_noop" if a.path == "/noop" else f"k8s_n{a.instances}"
