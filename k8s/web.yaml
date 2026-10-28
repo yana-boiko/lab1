@@ -25,7 +25,8 @@ spec:
         - name: web
           image: lab3-web:1
           ports:
-            - containerPort: 8000
+            - name: http
+              containerPort: 8000
           envFrom:
             - configMapRef:
                 name: web-config
@@ -77,3 +78,17 @@ spec:
     - port: 8000
       targetPort: 8000
       nodePort: 30080
+
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: web
+spec:
+  selector:
+    matchLabels:
+      app: web
+  podMetricsEndpoints:
+    - port: http
+      path: /metrics
+      interval: 5s

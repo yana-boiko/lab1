@@ -16,3 +16,11 @@ kubectl create configmap db-schema --from-file=db/schema.sql --dry-run=client -o
 
 # Маніфести
 kubectl apply -f k8s/
+
+# Моніторинг: metrics-server, Prometheus-стек, postgres-exporter
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo add metrics-server https://kubernetes-sigs.github.io/metrics-server/
+helm repo update
+helm upgrade --install metrics-server metrics-server/metrics-server -n kube-system --set "args={--kubelet-insecure-tls}"
+helm upgrade --install kps prometheus-community/kube-prometheus-stack -n monitoring --create-namespace -f monitoring/kps-values.yaml --wait --timeout 5m
+helm upgrade --install pg-exporter prometheus-community/prometheus-postgres-exporter -f monitoring/postgres-exporter-values.yaml
