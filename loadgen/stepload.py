@@ -17,17 +17,23 @@ RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "re
 TIMEOUT = 5.0
 TIMEOUT_CODE = -1
 CONN_ERR_CODE = 0
-TRANSIENT = 5
+TRANSIENT = 10
+CONN_REQUESTS = 100  
 _local = threading.local()
 
 
 def request_once(host, port, path):
     for attempt in range(2):
         c = getattr(_local, "conn", None)
+        if c is not None and _local.count >= CONN_REQUESTS:
+            c.close()  # зʼєднання відпрацювало 100 запитів: закриваємо, нижче відкриється нове
+            c = None
         reused = c is not None and c.sock is not None
         if c is None:
             c = http.client.HTTPConnection(host, port, timeout=TIMEOUT)
             _local.conn = c
+            _local.count = 0
+        _local.count += 1
         try:
             c.request("GET", path)
             r = c.getresponse()
@@ -46,7 +52,7 @@ def request_once(host, port, path):
     return CONN_ERR_CODE
 
 
-def worker(p, nproc, host, port, paths, start_wall, segs, stop, ok_counts, threads, out_q):
+def worker(p, nproc, host, port, paths, start_wall, segs, stop, ok_counts, conns, out_q):
     try:
         import ctypes
         ctypes.windll.winmm.timeBeginPeriod(1)
@@ -71,7 +77,20 @@ def worker(p, nproc, host, port, paths, start_wall, segs, stop, ok_counts, threa
         with lock:
             records.append((scheduled - t0, sent - t0, done - t0, status))
 
-    pool = ThreadPoolExecutor(max_workers=threads)
+    # один потік = одне зʼєднання. Усі зʼєднання відкриваємо одразу, до початку прогону;
+    # бар'єр змушує кожне із conns завдань виконатись у своєму потоці
+    pool = ThreadPoolExecutor(max_workers=conns)
+    barrier = threading.Barrier(conns)
+
+    def open_conn():
+        c = http.client.HTTPConnection(host, port, timeout=TIMEOUT)
+        c.connect()
+        _local.conn = c
+        _local.count = 0
+        barrier.wait()
+
+    for f in [pool.submit(open_conn) for _ in range(conns)]:
+        f.result()
     stopped = False
     for seg_start, dur, rate in segs:
         if stopped:
@@ -121,7 +140,9 @@ def run(a):
     u = urlparse(a.url)
     host, port = u.hostname, u.port or 80
     paths = [a.path] if a.path else [f"/lab-results/{i}" for i in fetch_ids(host, port)]
-    nproc = a.processes or os.cpu_count() or 1
+    nproc = min(a.processes or os.cpu_count() or 1, a.connections)
+    # a.connections зʼєднань ділимо між процесами порівну
+    conns_of = lambda p: a.connections // nproc + (1 if p < a.connections % nproc else 0)
     warmup, step_s = a.warmup, a.step_seconds
 
     def rate_of(k):
@@ -137,12 +158,12 @@ def run(a):
     q = mp.Queue()
     start_wall = time.time() + 2.0
     procs = [mp.Process(target=worker, args=(p, nproc, host, port, paths, start_wall, segs, stop,
-                                             ok_counts, a.threads, q)) for p in range(nproc)]
+                                             ok_counts, conns_of(p), q)) for p in range(nproc)]
     for pr in procs:
         pr.start()
 
     print(f"Прогін {a.label}: прогрів {warmup:g} с на {a.start_rate} запитів/с, далі сходинки по {step_s:g} с, "
-          f"процесів {nproc}, потоків на процес {a.threads}")
+          f"процесів {nproc}, зʼєднань {a.connections}, кожне закривається після {CONN_REQUESTS} запитів")
     below = 0
     done_steps = 0
     reason = f"виконано максимальну кількість сходинок ({a.max_steps})"
@@ -223,7 +244,7 @@ def run(a):
             "p99_ms": fmt(percentile(ls, 99)),
             "non2xx_pct": round(100 * n_bad / (n_ok + n_bad), 2) if n_ok + n_bad else "",
             "conn_errors": sum(conn[s] for s in win),
-            # unix-час початку і кінця 15-секундного вікна: для запитів до Prometheus (p99 сервера, CPU)
+            # unix-час початку і кінця 20-секундного вікна: для запитів до Prometheus (p99 сервера, CPU)
             "window_start_epoch": round(start_wall + lo),
             "window_end_epoch": round(start_wall + hi),
         })
@@ -256,19 +277,19 @@ def main():
     p.add_argument("--url", default="http://127.0.0.1:8000")
     p.add_argument("--path", default=None, help="фіксований шлях (наприклад /noop) замість /lab-results/{id}")
     p.add_argument("--instances", type=int, default=1, help="кількість вебінстансів (для назви файлів)")
-    p.add_argument("--label", default=None, help="назва прогону (за замовчуванням step_web<N> або step_noop)")
+    p.add_argument("--label", default=None, help="назва прогону (за замовчуванням k8s_n<N> або step_noop)")
     p.add_argument("--warmup", type=float, default=10, help="прогрів, с")
-    p.add_argument("--step-seconds", type=float, default=20, help="тривалість сходинки, с")
+    p.add_argument("--step-seconds", type=float, default=30, help="тривалість сходинки, с")
     p.add_argument("--start-rate", type=int, default=200, help="рівень прогріву і першої сходинки")
     p.add_argument("--step-rate", type=int, default=200, help="приріст інтенсивності між сходинками")
     p.add_argument("--max-steps", type=int, default=15, help="найбільша кількість сходинок")
     p.add_argument("--g", type=float, default=None, help="межа генератора G: зупинитись після сходинки, що її досягла")
-    p.add_argument("--threads", type=int, default=64, help="потоків у пулі кожного процесу")
+    p.add_argument("--connections", type=int, default=32, help="постійних зʼєднань у всьому генераторі (8 · R, R = 4)")
     p.add_argument("--processes", type=int, default=None, help="процесів (за замовчуванням кількість ядер)")
     p.add_argument("--save-raw", action="store_true", help="зберегти сирі записи кожного запиту")
     a = p.parse_args()
     if a.label is None:
-        a.label = "step_noop" if a.path == "/noop" else f"step_web{a.instances}"
+        a.label = "step_noop" if a.path == "/noop" else f"k8s_n{a.instances}"
     run(a)
 
 
