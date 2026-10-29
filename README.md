@@ -56,4 +56,6 @@ docker compose down -v
 - `results/` — результати вимірювань
 - `Dockerfile`, `.dockerignore`, `docker-compose.yml`, `.env.example`
 
-Звіт: [report.md](report.md)
+Звіт до першої лабораторної: [report.md](reports/lab1/report.md)
+Звіт до другої лабораторної: [report.md](reports/lab2/README.md)
+Звіт до третьої лабораторної: [report.md](reports/lab3/report.md)
