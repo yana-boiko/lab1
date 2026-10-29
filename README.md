@@ -2,6 +2,16 @@
 
 Варіант 4: результат лабораторного аналізу. Сервіс на Python 3.12 + FastAPI, база PostgreSQL 16, балансувальник nginx, усе в Docker Compose.
 
+##  Звіти
+
+| Лабораторна | Тема                                                 | Звіт                                                     |
+|-------------|------------------------------------------------------|----------------------------------------------------------|
+| **ЛР1** | CRUD-сервіс `/lab-results`                           | [**reports/lab1/report.md**](reports/lab1/report.md)     |
+| **ЛР2** | Метрики сервісу і межа масштабованості               | [**reports/lab2/report_2.md**](reports/lab2/report_2.md) |
+| **ЛР3** | Сервіс у Kubernetus з автомаштабуванням та без нього | [**reports/lab3/report_3.md**](reports/lab3/report_3.md) |
+
+---
+
 ## Запуск
 
 Потрібен Docker Desktop.
@@ -48,14 +58,19 @@ docker compose down -v
 
 ## Структура
 
-- `app/` — код сервісу (`main.py`) і скрипт healthcheck (`healthcheck.py`)
-- `db/schema.sql` — схема таблиці
-- `lb/nginx.conf` — конфігурація балансувальника
-- `loadgen/` — генератор навантаження
-- `scripts/` — допоміжні скрипти (перевірка циклу CRUD, розбір затримки)
+- `app/` — код сервісу (`main.py`) і скрипт healthcheck (`healthcheck.py`), ЛР1–ЛР3
+- `db/` — схема таблиці (`schema.sql`), ЛР1
+- `lb/` — конфігурація балансувальника (`nginx.conf`), ЛР1–ЛР2
+- `loadgen/` — генератор навантаження: `loadgen.py` (ЛР1), `stepload.py` (ЛР2–ЛР3),
+- `prometheus/` — конфігурація збору метрик (`prometheus.yml`), ЛР2–ЛР3
+- `monitoring/` — values для Helm: `kps-values.yaml`, `postgres-exporter-values.yaml`, ЛР3
+- `k8s/` — маніфести сервісу в Kubernetes (`postgres.yaml`, `web.yaml`), ЛР3
+- `k8s-extra/` — `hpa.yaml`, `ingress.yaml`, `traefik-values.yaml`, ЛР3
+- `kind/` — конфігурація кластера (`kind-config.yaml`), ЛР3
+- `scripts/` — допоміжні скрипти:
+  - ЛР1: `cycle_check.py` (перевірка циклу CRUD)
+  - ЛР2: `usl_fit.py`, `p99_compare.py`, `m4_plot.py`, `plot_step.py`, `breakdown.py`, `recompute_achieved.py`, `sample_stats.ps1`
+  - ЛР3: `usl_fit_k8s.py`, `k8s_stats.py`, `pod_rps_chart.py`, `elasticity.py`, `deploy.ps1`
 - `results/` — результати вимірювань
-- `Dockerfile`, `.dockerignore`, `docker-compose.yml`, `.env.example`
-
-Звіт до першої лабораторної: [report.md](reports/lab1/report.md)
-Звіт до другої лабораторної: [report.md](reports/lab2/README.md)
-Звіт до третьої лабораторної: [report.md](reports/lab3/report.md)
+- `reports/` — звіти з зображеннями (`lab1/`, `lab2/`, `lab3/`)
+- `Dockerfile`, `.dockerignore`, `docker-compose.yml`, `.env.example`, `requirements.txt`
